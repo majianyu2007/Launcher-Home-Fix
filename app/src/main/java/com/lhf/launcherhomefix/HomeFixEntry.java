@@ -1,6 +1,5 @@
 package com.lhf.launcherhomefix;
 
-import android.app.ActivityOptions;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -8,9 +7,6 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.PointF;
-import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
 
 import java.lang.reflect.Field;
@@ -36,9 +32,12 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
     private static volatile long sLastPredictHomeMs = 0L;
     private static volatile long sLastPredictRecentsMs = 0L;
     private static volatile Object sLastSwipeUpHandler = null;
-    private static volatile long sLastDirectHomeMs = 0L;
-    private static volatile long sLastHomeLaunchMs = 0L;
-    private static volatile long sDirectHomeBypassUntilMs = 0L;
+
+    // No fixed-ms gating: arm by gesture token + limited budget.
+    private static volatile int sLastSeenGestureToken = 0;
+    private static volatile int sArmedGestureToken = 0;
+    private static volatile int sHomeLaunchedGestureToken = 0;
+    private static volatile boolean sDirectHomeArmed = false;
     private static volatile int sDirectHomeBypassBudget = 0;
 
     @Override
@@ -72,6 +71,12 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         float velocity = (Float) param.args[0];
                         PointF pointF = (PointF) param.args[1];
                         sLastSwipeUpHandler = param.thisObject;
+
+                        int token = resolveGestureToken(param.thisObject);
+                        if (token != 0 && token != sLastSeenGestureToken) {
+                            sLastSeenGestureToken = token;
+                            clearDirectHomeArm("new gesture token=" + token);
+                        }
 
                         // Try both fling flags; if either predicts HOME, we treat as HOME pre-signal.
                         String t1 = callCalculateEndTargetSafely(param.thisObject, pointF, velocity, false);
@@ -117,11 +122,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         try {
-                            long now = SystemClock.uptimeMillis();
-                            if (now - sLastDirectHomeMs < 250) {
-                                return;
-                            }
-
                             if (param.args == null || param.args.length < 3) return;
                             if (!(param.args[0] instanceof Float) || !(param.args[1] instanceof Boolean) || !(param.args[2] instanceof PointF)) {
                                 return;
@@ -147,10 +147,11 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             boolean verticalUp = pointF.y < -8f && Math.abs(pointF.y) >= Math.abs(pointF.x);
                             if (!verticalUp) return;
 
-                            // Keep finger-follow animation: do NOT short-circuit handleNormalGestureEnd.
-                            // Arm a short bypass window to kill late recents rebound.
-                            sLastDirectHomeMs = now;
-                            sDirectHomeBypassUntilMs = now + (fling ? 1000 : 800);
+                            int token = resolveGestureToken(param.thisObject);
+                            if (token == 0) token = System.identityHashCode(param.thisObject);
+
+                            sArmedGestureToken = token;
+                            sDirectHomeArmed = true;
                             sDirectHomeBypassBudget = 2;
 
                             try {
@@ -162,10 +163,10 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             }
 
                             // Start HOME immediately to avoid "home appears only after animation ends".
-                            maybeStartHomeNow(ctx, now);
+                            maybeStartHomeForGesture(ctx, token);
                             notifySwipeToRecentFinishedEarly(ctx);
 
-                            logI("gesture HOME armed + early home start, fling=" + fling + ", window=" + (fling ? 1000 : 800) + "ms home=" + defaultHome.flattenToShortString());
+                            logI("gesture HOME armed + early home start, fling=" + fling + ", token=" + token + " home=" + defaultHome.flattenToShortString());
                         } catch (Throwable t) {
                             logE("direct-home gesture hook error", t);
                         }
@@ -220,7 +221,7 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
 
                         // Block recents rebound; keep operation light to avoid occasional freeze.
                         notifySwipeToRecentFinishedEarly(ctx);
-                        maybeStartHomeNow(ctx, SystemClock.uptimeMillis());
+                        maybeStartHomeForGesture(ctx, sArmedGestureToken);
                         consumeDirectHomeBypass();
 
                         Class<?> rt = ((Method) param.method).getReturnType();
@@ -276,19 +277,36 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
         if (defaultHome == null) return false;
         if (PKG_LAUNCHER.equals(defaultHome.getPackageName())) return false;
 
-        long now = SystemClock.uptimeMillis();
-        boolean armed = sDirectHomeBypassUntilMs > now && sDirectHomeBypassBudget > 0;
+        boolean armed = sDirectHomeArmed && sDirectHomeBypassBudget > 0;
         if (armed) {
-            logI("redirect hit (bypass): budget=" + sDirectHomeBypassBudget + " home=" + defaultHome.flattenToShortString());
+            logI("redirect hit (armed): token=" + sArmedGestureToken + " budget=" + sDirectHomeBypassBudget + " home=" + defaultHome.flattenToShortString());
         }
         return armed;
     }
 
-    private void maybeStartHomeNow(Context ctx, long now) {
+    private void maybeStartHomeForGesture(Context ctx, int token) {
         if (ctx == null) return;
-        if (now - sLastHomeLaunchMs < 220) return;
-        sLastHomeLaunchMs = now;
+        if (token != 0 && sHomeLaunchedGestureToken == token) return;
         startDefaultHomeNow(ctx);
+        if (token != 0) {
+            sHomeLaunchedGestureToken = token;
+        }
+    }
+
+    private int resolveGestureToken(Object swipeUpHandlerObj) {
+        try {
+            Object gestureState = findFieldValue(swipeUpHandlerObj, new String[]{"mGestureState"});
+            return gestureState == null ? 0 : System.identityHashCode(gestureState);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private void clearDirectHomeArm(String reason) {
+        sDirectHomeArmed = false;
+        sDirectHomeBypassBudget = 0;
+        sArmedGestureToken = 0;
+        logI("clear arm: " + reason);
     }
 
     private void consumeDirectHomeBypass() {
@@ -297,64 +315,12 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                 sDirectHomeBypassBudget--;
             }
             if (sDirectHomeBypassBudget <= 0) {
-                sDirectHomeBypassUntilMs = 0L;
+                clearDirectHomeArm("budget exhausted");
             }
         } catch (Throwable ignored) {
         }
     }
 
-    private void scheduleRecentsTailWatchdog(final Object absSwipeUpHandlerObj, final Context ctx) {
-        try {
-            Handler h = new Handler(Looper.getMainLooper());
-            h.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        // In direct-home sequence, clean recents tail once after a short delay.
-                        if (SystemClock.uptimeMillis() - sLastDirectHomeMs <= 1800) {
-                            forceFinishRunningRecentsAnimation(absSwipeUpHandlerObj);
-                            notifySwipeToRecentFinishedEarly(ctx);
-                            logI("tail watchdog: forced recents finish");
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }, 120);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void finishCurrentTransitionToHomeBestEffort(Object absSwipeUpHandlerObj) {
-        if (absSwipeUpHandlerObj == null) return;
-        try {
-            XposedHelpers.callMethod(absSwipeUpHandlerObj, "finishCurrentTransitionToHome");
-            logI("finishCurrentTransitionToHome() called");
-            return;
-        } catch (Throwable ignored) {
-        }
-        // fallback
-        forceFinishRunningRecentsAnimation(absSwipeUpHandlerObj);
-    }
-
-    private void forceFinishRunningRecentsAnimation(Object absSwipeUpHandlerObj) {
-        if (absSwipeUpHandlerObj == null) return;
-        try {
-            Object taskAnimMgr = findFieldValue(absSwipeUpHandlerObj, new String[]{"mTaskAnimationManager"});
-            if (taskAnimMgr != null) {
-                XposedHelpers.callMethod(taskAnimMgr, "finishRunningRecentsAnimation", true);
-                return;
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Object recentsController = findFieldValue(absSwipeUpHandlerObj, new String[]{"mRecentsAnimationController"});
-            if (recentsController != null) {
-                XposedHelpers.callMethod(recentsController, "finish", true, null);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
 
     private void notifySwipeToRecentFinishedEarly(Context ctx) {
         if (ctx == null) return;
