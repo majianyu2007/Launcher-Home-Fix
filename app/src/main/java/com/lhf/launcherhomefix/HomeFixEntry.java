@@ -8,8 +8,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.PointF;
 import android.os.Build;
-import android.os.SystemClock;
-
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -30,9 +28,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
     private static final String TAG = "LHF-HomeFix";
     private static final String PKG_LAUNCHER = "com.android.launcher";
 
-    private static volatile long sLastPredictHomeMs = 0L;
-    private static volatile long sLastPredictRecentsMs = 0L;
-    private static volatile Object sLastSwipeUpHandler = null;
 
     // No fixed-ms gating: arm by gesture token + limited budget.
     private static volatile int sLastSeenGestureToken = 0;
@@ -71,7 +66,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
 
                         float velocity = (Float) param.args[0];
                         PointF pointF = (PointF) param.args[1];
-                        sLastSwipeUpHandler = param.thisObject;
 
                         int token = resolveGestureToken(param.thisObject);
                         if (token != 0 && token != sLastSeenGestureToken) {
@@ -83,10 +77,7 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         String t1 = callCalculateEndTargetSafely(param.thisObject, pointF, velocity, false);
                         String t2 = callCalculateEndTargetSafely(param.thisObject, pointF, velocity, true);
 
-                        long now = SystemClock.uptimeMillis();
                         if ("HOME".equals(t1) || "HOME".equals(t2)) {
-                            sLastPredictHomeMs = now;
-
                             Context ctx = extractContext(param.thisObject);
                             ComponentName defaultHome = resolveDefaultHome(ctx);
                             if (defaultHome != null && !PKG_LAUNCHER.equals(defaultHome.getPackageName())
@@ -101,8 +92,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             } else {
                                 logI("pre-predict HOME (onGestureEnded), t1=" + t1 + ", t2=" + t2);
                             }
-                        } else if ("RECENTS".equals(t1) || "RECENTS".equals(t2)) {
-                            sLastPredictRecentsMs = now;
                         }
                     } catch (Throwable t) {
                         logE("onGestureEnded pre-predict error", t);
@@ -206,16 +195,11 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
-                        sLastSwipeUpHandler = param.thisObject;
                         Object result = param.getResult();
                         if (result == null) return;
                         String target = String.valueOf(result);
-                        long now = SystemClock.uptimeMillis();
                         if ("HOME".equals(target)) {
-                            sLastPredictHomeMs = now;
                             logI("predict HOME");
-                        } else if ("RECENTS".equals(target)) {
-                            sLastPredictRecentsMs = now;
                         }
                     } catch (Throwable t) {
                         logE("calculateEndTarget trace error", t);
@@ -268,7 +252,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
-                        sLastSwipeUpHandler = param.thisObject;
                         Object gestureState = findFieldValue(param.thisObject, new String[]{"mGestureState"});
                         if (gestureState == null) return;
                         Object end = XposedHelpers.callMethod(gestureState, "getEndTarget");
@@ -392,13 +375,14 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
 
     private void invokeCandidateMethod(Object target, String contains) {
         if (target == null || contains == null) return;
+        String containsLower = contains.toLowerCase();
         Class<?> c = target.getClass();
         while (c != null) {
             Method[] methods = c.getDeclaredMethods();
             for (Method method : methods) {
                 try {
                     String lower = method.getName().toLowerCase();
-                    if (!lower.contains(contains.toLowerCase())) continue;
+                    if (!lower.contains(containsLower)) continue;
                     Class<?>[] p = method.getParameterTypes();
                     method.setAccessible(true);
                     if (p.length == 0) {
