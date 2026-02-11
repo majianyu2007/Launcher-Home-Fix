@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.PointF;
+import android.os.Build;
 import android.os.SystemClock;
 
 import java.lang.reflect.Field;
@@ -226,7 +227,8 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
 
                         Class<?> rt = ((Method) param.method).getReturnType();
                         if (rt == boolean.class || rt == Boolean.class) {
-                            param.setResult(false);
+                            // Report as handled to avoid downstream fallback scheduling extra tail animation.
+                            param.setResult(true);
                         } else {
                             param.setResult(null);
                         }
@@ -258,10 +260,12 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         ComponentName defaultHome = resolveDefaultHome(ctx);
                         if (defaultHome == null || PKG_LAUNCHER.equals(defaultHome.getPackageName())) return;
 
-                        // Settled HOME: only light cleanup, avoid hard force-finish to reduce freeze risk.
+                        // Settled HOME: cleanup + best-effort tail finish to reduce visible lag to launcher.
                         notifySwipeToRecentFinishedEarly(ctx);
+                        maybeStartHomeForGesture(ctx, sArmedGestureToken);
+                        forceFinishRecentsAnimationTail(param.thisObject);
                         sDirectHomeBypassBudget = Math.min(sDirectHomeBypassBudget, 1);
-                        logI("settled HOME -> light cleanup");
+                        logI("settled HOME -> cleanup + finish animation tail");
                     } catch (Throwable t) {
                         logE("onSettledOnEndTarget hook error", t);
                     }
@@ -341,14 +345,53 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
             ComponentName homeCmp = resolveDefaultHome(context);
             Intent home = new Intent(Intent.ACTION_MAIN);
             home.addCategory(Intent.CATEGORY_HOME);
-            home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_NO_ANIMATION);
             if (homeCmp != null) {
                 home.setComponent(homeCmp);
                 home.setPackage(homeCmp.getPackageName());
             }
-            context.startActivity(home);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+                context.startActivity(home, null);
+            } else {
+                context.startActivity(home);
+            }
         } catch (Throwable t) {
             logW("startDefaultHomeNow failed: " + t.getMessage());
+        }
+    }
+
+    private void forceFinishRecentsAnimationTail(Object swipeUpHandlerObj) {
+        if (swipeUpHandlerObj == null) return;
+        try {
+            // OEM builds vary; use loose method-name matching and only simple signatures.
+            invokeCandidateMethod(swipeUpHandlerObj, "finishRecentsAnimation");
+            invokeCandidateMethod(swipeUpHandlerObj, "finishRecentsControllerToHome");
+            invokeCandidateMethod(swipeUpHandlerObj, "finishCurrentTransitionToHome");
+            invokeCandidateMethod(swipeUpHandlerObj, "endRunningWindowAnim");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void invokeCandidateMethod(Object target, String contains) {
+        if (target == null || contains == null) return;
+        Class<?> c = target.getClass();
+        while (c != null) {
+            Method[] methods = c.getDeclaredMethods();
+            for (Method method : methods) {
+                try {
+                    String lower = method.getName().toLowerCase();
+                    if (!lower.contains(contains.toLowerCase())) continue;
+                    Class<?>[] p = method.getParameterTypes();
+                    method.setAccessible(true);
+                    if (p.length == 0) {
+                        method.invoke(target);
+                    } else if (p.length == 1 && (p[0] == boolean.class || p[0] == Boolean.class)) {
+                        method.invoke(target, true);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            c = c.getSuperclass();
         }
     }
 

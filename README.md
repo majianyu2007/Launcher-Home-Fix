@@ -126,3 +126,38 @@ adb logcat | grep -E "LHF-HomeFix|SystemUiProxy|RecentsTransitionHandler|Activit
 
 - 本模块面向特定 ROM 行为（ColorOS 手势链路）调优，不保证所有机型/版本一致。
 - 若同时安装其它修改 HOME/Recents 的模块，可能互相干扰。
+
+---
+
+## GitHub Actions 自动构建（Debug + Release）
+
+已添加工作流：`.github/workflows/android-build.yml`。
+
+触发时机：
+
+- `push`
+- `pull_request`
+- 手动触发 `workflow_dispatch`
+
+工作流会执行：
+
+```bash
+./gradlew --no-daemon clean assembleDebug assembleRelease
+```
+
+并上传两个产物：
+
+- `app-debug-apk` → `app/build/outputs/apk/debug/app-debug.apk`
+- `app-release-apk` → `app/build/outputs/apk/release/app-release-unsigned.apk`
+
+### Debug 和 Release 有什么区别？
+
+在当前项目配置下（`minifyEnabled false`，且未自定义 release 签名）：
+
+- **共同点**：功能代码基本一致（当前没有通过 `BuildConfig.DEBUG` 或 productFlavor 做功能分支）。
+- **主要区别**：
+  - `debug` 由 debug keystore 自动签名，便于直接安装调试。
+  - `release` 这里产出的是 **unsigned** 包（`app-release-unsigned.apk`），通常用于后续正式签名。
+  - Android 构建系统在 debug/release 的默认可调试属性、优化策略上仍有差异，但本项目目前未启用混淆压缩，因此体感差异一般不会特别大。
+
+如果你后续需要“可直接安装的 release 包”，可以在 `build.gradle` 增加 `signingConfigs.release` 并给 `release` 绑定签名。
