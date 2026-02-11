@@ -74,8 +74,8 @@ app/
 
 ### 环境要求
 
-- JDK 11+
-- Android SDK（`compileSdk 34`）
+- JDK 17+
+- Android SDK（`compileSdk 35`）
 - 可用的 Gradle Wrapper（仓库已提供）
 
 ### 构建命令
