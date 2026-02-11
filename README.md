@@ -1,54 +1,80 @@
 # Launcher Home Fix（LSPosed 模块）
 
-一个针对 **ColorOS + 第三方桌面** 的手势返回优化模块。
+用于优化 **ColorOS + 第三方桌面** 场景下的回桌面手势体验。
 
-目标：减少/消除这条链路导致的卡顿与空白感：
+目标链路：
 
-> App → RecentsActivity → 第三方 HOME
-
-希望尽量接近：
-
-> App → 第三方 HOME（动画连续、不僵硬）
+- 原始常见链路：`App -> RecentsActivity -> 第三方桌面`
+- 优化目标：尽量在不破坏跟手动画的前提下，减少 Recents 回弹和回桌面延迟
 
 ---
 
-## 一、项目现状（持续迭代中）
+## 当前实现思路（已改为非固定 ms 主判定）
 
-目前版本基于 `com.android.launcher` 进程做 Hook，核心思路是：
+核心逻辑在 `HomeFixEntry.java`，采用：
 
-1. 手势结束阶段提前识别 HOME 意图（不破坏原生跟手动画链）
-2. 在短窗口内拦截晚到的 `startRecentsActivity` 回弹
-3. 需要时补一次收尾，避免 Recents 残留导致“半截动画/卡住”
-
-> 这是一个“在真实机器日志上持续调参”的工程，不是一次性静态 patch。
-
----
-
-## 二、代码结构
-
-```text
-Launcher-Home-Fix/
-├─ app/
-│  ├─ libs/
-│  │  └─ xposed-api-82.jar
-│  ├─ src/main/
-│  │  ├─ assets/xposed_init
-│  │  ├─ java/com/lhf/launcherhomefix/HomeFixEntry.java
-│  │  ├─ res/values/arrays.xml
-│  │  └─ AndroidManifest.xml
-│  └─ build.gradle
-├─ gradle/wrapper/
-├─ build.gradle
-├─ settings.gradle
-├─ gradle.properties
-└─ README.md
-```
+1. **手势结束阶段识别 HOME 意图**
+2. **按“手势 token + 预算”进行回弹拦截**（而不是依赖固定毫秒阈值作为主判定）
+3. **必要时提前启动第三方 HOME**，避免“动画结束后桌面才出现”
+4. 仅在 `com.android.launcher` 进程生效，尽量降低副作用
 
 ---
 
-## 三、构建
+## 关键配置在哪（你关心的部分）
 
-在项目根目录执行：
+### 1) LSPosed 作用域配置
+
+- 文件：`app/src/main/res/values/arrays.xml`
+- 键：`xposed_scope`
+- 当前默认仅：`com.android.launcher`
+
+---
+
+### 2) Hook 入口类
+
+- 文件：`app/src/main/assets/xposed_init`
+- 当前入口：`com.lhf.launcherhomefix.HomeFixEntry`
+
+---
+
+### 3) 核心逻辑与可调点
+
+- 文件：`app/src/main/java/com/lhf/launcherhomefix/HomeFixEntry.java`
+
+重点方法：
+
+- `hookDirectHomeAtGestureEnd(...)`
+  - 处理手势结束阶段 HOME 意图
+  - 这里有“竖直上滑判定”（用于避免误伤应用切换）
+- `hookSystemUiProxyStartRecents(...)`
+  - 兜底拦截晚到的 Recents 回弹
+- `maybeStartHomeForGesture(...)`
+  - 按手势 token 控制本次手势是否已启动 HOME
+- `clearDirectHomeArm(...)` / `consumeDirectHomeBypass(...)`
+  - 管理当前手势的“armed 状态”和拦截预算
+
+可调参数（都在 `HomeFixEntry` 里）：
+
+- `sDirectHomeBypassBudget`：单次手势允许拦截回弹的次数预算
+- `verticalUp` 判定条件：决定哪些手势被当作“回桌面”
+
+---
+
+### 4) 模块文案与描述
+
+- 文件：`app/src/main/res/values/strings.xml`
+
+---
+
+### 5) 构建配置
+
+- 文件：`app/build.gradle`
+  - `compileSdk / targetSdk / minSdk`
+  - `xposed-api-82.jar` 依赖
+
+---
+
+## 构建
 
 ```bash
 ./gradlew assembleDebug
@@ -60,43 +86,43 @@ Launcher-Home-Fix/
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+> 本地 SDK 路径通过 `local.properties` 指定；该文件默认不提交。
+
 ---
 
-## 四、LSPosed 配置
+## 安装与 LSPosed
 
 1. 安装 APK
 2. 在 LSPosed 启用模块
-3. Scope 仅勾选：
-   - `com.android.launcher`
-4. 重启系统（或至少重启对应进程）
+3. Scope 勾选 `com.android.launcher`
+4. 重启系统（建议）
 
 ---
 
-## 五、日志建议（用于继续调优）
+## 建议测试项
 
-建议过滤以下关键字：
+1. 慢速上滑回桌面（看动画连续性）
+2. 快速上滑回桌面（看是否偶发卡住）
+3. 左右切应用手势（看是否被误伤）
+4. 连续 20 次回桌面压力测试
 
-- `LHF-HomeFix`
-- `SystemUiProxy`
-- `RecentsTransitionHandler`
-- `ActivityTaskManager`
+---
 
-示例：
+## 日志采集建议
 
 ```bash
 adb logcat | grep -E "LHF-HomeFix|SystemUiProxy|RecentsTransitionHandler|ActivityTaskManager"
 ```
 
----
+重点关注：
 
-## 六、注意事项
-
-- 本模块仅针对特定 ROM 行为（ColorOS 手势链路）设计，不保证通用于所有机型/版本。
-- 若你安装了其它也会改 HOME/Recents 的模块，可能互相干扰。
-- 该仓库会继续围绕“动画跟手 + 稳定性 + 低延迟”做迭代。
+- `gesture HOME armed`
+- `blocked startRecentsActivity -> start HOME`
+- `clear arm: ...`
 
 ---
 
-## 七、许可证
+## 免责声明
 
-当前未添加许可证文件（后续可补充 MIT）。
+- 本模块面向特定 ROM 行为（ColorOS 手势链路）调优，不保证所有机型/版本一致。
+- 若同时安装其它修改 HOME/Recents 的模块，可能互相干扰。
