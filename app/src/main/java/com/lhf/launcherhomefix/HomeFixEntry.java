@@ -86,7 +86,21 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         long now = SystemClock.uptimeMillis();
                         if ("HOME".equals(t1) || "HOME".equals(t2)) {
                             sLastPredictHomeMs = now;
-                            logI("pre-predict HOME (onGestureEnded), t1=" + t1 + ", t2=" + t2);
+
+                            Context ctx = extractContext(param.thisObject);
+                            ComponentName defaultHome = resolveDefaultHome(ctx);
+                            if (defaultHome != null && !PKG_LAUNCHER.equals(defaultHome.getPackageName())
+                                    && isLikelySwipeUpHomeGesture(pointF)) {
+                                if (token == 0) token = System.identityHashCode(param.thisObject);
+                                sArmedGestureToken = token;
+                                sDirectHomeArmed = true;
+                                sDirectHomeBypassBudget = 2;
+                                maybeStartHomeForGesture(ctx, token);
+                                notifySwipeToRecentFinishedEarly(ctx);
+                                logI("pre-predict HOME armed + early home start, token=" + token + " t1=" + t1 + ", t2=" + t2);
+                            } else {
+                                logI("pre-predict HOME (onGestureEnded), t1=" + t1 + ", t2=" + t2);
+                            }
                         } else if ("RECENTS".equals(t1) || "RECENTS".equals(t2)) {
                             sLastPredictRecentsMs = now;
                         }
@@ -107,6 +121,11 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private boolean isLikelySwipeUpHomeGesture(PointF pointF) {
+        if (pointF == null) return false;
+        return pointF.y < -6f && Math.abs(pointF.y) >= Math.abs(pointF.x) * 0.6f;
     }
 
     /**
@@ -144,9 +163,8 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             ComponentName defaultHome = resolveDefaultHome(ctx);
                             if (defaultHome == null || PKG_LAUNCHER.equals(defaultHome.getPackageName())) return;
 
-                            // Restrict to true swipe-up gestures (avoid harming quick switch/app switch paths).
-                            boolean verticalUp = pointF.y < -8f && Math.abs(pointF.y) >= Math.abs(pointF.x);
-                            if (!verticalUp) return;
+                            // Restrict to likely swipe-up gestures (avoid harming quick switch/app switch paths).
+                            if (!isLikelySwipeUpHomeGesture(pointF)) return;
 
                             int token = resolveGestureToken(param.thisObject);
                             if (token == 0) token = System.identityHashCode(param.thisObject);
