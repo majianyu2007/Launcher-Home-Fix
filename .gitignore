@@ -1,0 +1,34 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Native build caches
+.externalNativeBuild/
+.cxx/
+
+# Signing / secrets
+*.jks
+*.keystore
+*.p12
+
+# Outputs
+*.apk
+*.ap_
+*.aab
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Local debug artifacts
+_apk_unzip/
+lhf_*.log
+launcher-home-fix-lsposed/
