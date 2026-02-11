@@ -37,6 +37,7 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
     private static volatile long sLastPredictRecentsMs = 0L;
     private static volatile Object sLastSwipeUpHandler = null;
     private static volatile long sLastDirectHomeMs = 0L;
+    private static volatile long sLastHomeLaunchMs = 0L;
     private static volatile long sDirectHomeBypassUntilMs = 0L;
     private static volatile int sDirectHomeBypassBudget = 0;
 
@@ -142,10 +143,14 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             ComponentName defaultHome = resolveDefaultHome(ctx);
                             if (defaultHome == null || PKG_LAUNCHER.equals(defaultHome.getPackageName())) return;
 
-                            // Keep finger-follow animation: do NOT short-circuit handleNormalGestureEnd here.
-                            // We only arm a HOME bypass window and let original gesture pipeline animate naturally.
+                            // Restrict to true swipe-up gestures (avoid harming quick switch/app switch paths).
+                            boolean verticalUp = pointF.y < -8f && Math.abs(pointF.y) >= Math.abs(pointF.x);
+                            if (!verticalUp) return;
+
+                            // Keep finger-follow animation: do NOT short-circuit handleNormalGestureEnd.
+                            // Arm a short bypass window to kill late recents rebound.
                             sLastDirectHomeMs = now;
-                            sDirectHomeBypassUntilMs = now + (fling ? 1200 : 900);
+                            sDirectHomeBypassUntilMs = now + (fling ? 1000 : 800);
                             sDirectHomeBypassBudget = 2;
 
                             try {
@@ -156,7 +161,11 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                             } catch (Throwable ignored) {
                             }
 
-                            logI("gesture HOME armed (keep original animation), fling=" + fling + ", window=" + (fling ? 1200 : 900) + "ms home=" + defaultHome.flattenToShortString());
+                            // Start HOME immediately to avoid "home appears only after animation ends".
+                            maybeStartHomeNow(ctx, now);
+                            notifySwipeToRecentFinishedEarly(ctx);
+
+                            logI("gesture HOME armed + early home start, fling=" + fling + ", window=" + (fling ? 1000 : 800) + "ms home=" + defaultHome.flattenToShortString());
                         } catch (Throwable t) {
                             logE("direct-home gesture hook error", t);
                         }
@@ -209,11 +218,9 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         if (ctx == null) return;
                         if (!shouldRedirectRecentsToHome(ctx)) return;
 
-                        // Block recents rebound, then make sure HOME is started immediately.
-                        finishCurrentTransitionToHomeBestEffort(sLastSwipeUpHandler);
+                        // Block recents rebound; keep operation light to avoid occasional freeze.
                         notifySwipeToRecentFinishedEarly(ctx);
-                        startDefaultHomeNow(ctx, false);
-                        scheduleRecentsTailWatchdog(sLastSwipeUpHandler, ctx);
+                        maybeStartHomeNow(ctx, SystemClock.uptimeMillis());
                         consumeDirectHomeBypass();
 
                         Class<?> rt = ((Method) param.method).getReturnType();
@@ -250,9 +257,10 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                         ComponentName defaultHome = resolveDefaultHome(ctx);
                         if (defaultHome == null || PKG_LAUNCHER.equals(defaultHome.getPackageName())) return;
 
-                        forceFinishRunningRecentsAnimation(param.thisObject);
+                        // Settled HOME: only light cleanup, avoid hard force-finish to reduce freeze risk.
                         notifySwipeToRecentFinishedEarly(ctx);
-                        logI("settled HOME -> force finish recents tail");
+                        sDirectHomeBypassBudget = Math.min(sDirectHomeBypassBudget, 1);
+                        logI("settled HOME -> light cleanup");
                     } catch (Throwable t) {
                         logE("onSettledOnEndTarget hook error", t);
                     }
@@ -274,6 +282,13 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
             logI("redirect hit (bypass): budget=" + sDirectHomeBypassBudget + " home=" + defaultHome.flattenToShortString());
         }
         return armed;
+    }
+
+    private void maybeStartHomeNow(Context ctx, long now) {
+        if (ctx == null) return;
+        if (now - sLastHomeLaunchMs < 220) return;
+        sLastHomeLaunchMs = now;
+        startDefaultHomeNow(ctx);
     }
 
     private void consumeDirectHomeBypass() {
@@ -354,7 +369,7 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
         }
     }
 
-    private void startDefaultHomeNow(Context context, boolean animated) {
+    private void startDefaultHomeNow(Context context) {
         if (context == null) return;
         try {
             ComponentName homeCmp = resolveDefaultHome(context);
@@ -365,21 +380,6 @@ public class HomeFixEntry implements IXposedHookLoadPackage {
                 home.setComponent(homeCmp);
                 home.setPackage(homeCmp.getPackageName());
             }
-
-            if (animated) {
-                try {
-                    Bundle opts = ActivityOptions.makeCustomAnimation(
-                            context,
-                            android.R.anim.fade_in,
-                            android.R.anim.fade_out
-                    ).toBundle();
-                    context.startActivity(home, opts);
-                    return;
-                } catch (Throwable ignored) {
-                    // fallback to plain startActivity below
-                }
-            }
-
             context.startActivity(home);
         } catch (Throwable t) {
             logW("startDefaultHomeNow failed: " + t.getMessage());
